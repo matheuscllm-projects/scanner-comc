@@ -155,6 +155,13 @@ class Settings:
     extreme_discount_percent: int = 60   # 0 desliga
     raw_plausibility: bool = True
 
+    # --- Modo grading (2026-11-16): carta solta NM como candidata a graduar ---
+    # Ligado por `scan --grading`. Troca o crivo de desconto pela conta da graduação
+    # (custo total × referência da nota máxima × taxa histórica do censo).
+    grading_mode: bool = False
+    grading_grader: str = "PSA"          # rota: PSA (10/9) ou CGC (10 Gem/9.5)
+    grading_cost_usd: float = 0.0        # custo de graduar por carta; 0 = padrão da rota
+
     # --- Eras ---
     default_era: str = "all"
     era_vintage_max_year: int = 2003   # WotC (Base…Skyridge); 2004+ = NM só
@@ -220,6 +227,8 @@ def load_settings(env_file: Path | None = None) -> Settings:
         trust_confidence=_get_float("TRUST_CONFIDENCE", 0.90),
         extreme_discount_percent=max(0, _get_int("EXTREME_DISCOUNT_PERCENT", 60)),
         raw_plausibility=_get_bool("RAW_PLAUSIBILITY", True),
+        grading_grader=(_get("GRADING_GRADER", "PSA") or "PSA").strip().upper(),
+        grading_cost_usd=max(0.0, _get_float("GRADING_COST_USD", 0.0)),
         default_era=(_get("DEFAULT_ERA", "all") or "all").lower(),
         era_vintage_max_year=_get_int("ERA_VINTAGE_MAX_YEAR", 2003),
         era_middle_max_year=_get_int("ERA_MIDDLE_MAX_YEAR", 2019),

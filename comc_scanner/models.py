@@ -112,6 +112,9 @@ class Deal:
     raw_sales_label: str = ""
     status: str = STATUS_OK       # OK | MATCH_REVIEW (match/preço não confiável o bastante)
     review_reasons: tuple[str, ...] = ()
+    # Modo grading (2026-11-16): a conta de graduar esta listagem
+    # (``grading_mode.GradingCase``). None = scan de arbitragem normal.
+    grading: object | None = None
 
     @property
     def listing_type(self) -> str:
@@ -124,7 +127,7 @@ class Deal:
     def as_row(self) -> dict[str, object]:
         """Flat dict for CSV/JSON/markdown output."""
         m = compute_metrics(self.tcg_reference, self.listing.price)
-        return {
+        row = {
             "margin_pct": m.discount_pct,
             "roi_pct": m.roi_pct,
             "comc_price": round(self.listing.price, 2),
@@ -169,3 +172,6 @@ class Deal:
             "tcg_url": self.product.url,
             "ref_url": self.ref_url or self.product.url,
         }
+        if self.grading is not None:
+            row.update(self.grading.as_row())
+        return row

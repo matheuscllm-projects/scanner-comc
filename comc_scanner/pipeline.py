@@ -28,13 +28,14 @@ from pathlib import Path
 from .comc_scraper import ComcAccessError, ComcBlockedError, ComcScraper
 from .config import Settings
 from .grading import Grade
+from .grading_mode import build_case, classify_grading_row, effective_cost, plan_for
 from .iconic import match_iconic
 from .languages import detect_language, language_label
 from .margin import gross_margin
 from .matcher import match
 from .models import Deal
 from .normalize import normalize_set, set_aliases
-from .pricecharting_client import (PcError, graded_reference, product_page_url,
+from .pricecharting_client import (PcError, graded_reference, grading_snapshot, product_page_url,
                                    raw_condition_reference, raw_plausibility,
                                    variant_tokens)
 from .ranking import sort_key
@@ -470,6 +471,52 @@ class Scanner:
         deal.raw_sales_median, deal.raw_sales_n, deal.raw_sales_label = ref.price, ref.n_sales, ref.label
         st.bump("raw_plausibility_ok")
 
+    def _process_grading(self, deal: Deal, st: FunnelStats) -> Deal | None:
+        """Modo grading (operador, 2026-11-16): a listagem solta NM já identificada vira
+        uma CONTA de graduação em vez de passar pelo crivo de desconto.
+
+        Uma consulta ao PriceCharting por carta (página da variante EXATA da listagem):
+        referência da nota máxima e da 2ª nota (mediana de vendas da mesma
+        certificadora+nota+variante), censo de população e volume. Saídas contadas no
+        funil: fonte falhou (`grading_pc_error`), sem página da variante
+        (`grading_no_page`), nota máxima sem venda comparável
+        (`grading_no_top_reference`) e nota máxima que não paga o custo total
+        (`grading_top_below_cost`). O que sobra entra na tabela com status OK ou
+        MATCH_REVIEW — nada é aprovado para compra; a decisão é do operador."""
+        s = self.settings
+        plan = plan_for(s.grading_grader)
+        outcome, snap = self._pc_guarded(
+            grading_snapshot, deal.product.name, deal.product.number, deal.product.set_name,
+            (plan.top, plan.second), cache_dir=s.pc_cache_dir,
+            variants=self._listing_variants(deal.listing))
+        if outcome == "pc_error":
+            st.bump("grading_pc_error")
+            return None
+        if outcome != "ok":
+            st.bump("grading_no_page")
+            return None
+        case = build_case(plan, snap, comc_price=deal.listing.price,
+                          raw_value=deal.tcg_reference,
+                          grading_cost=effective_cost(plan, s.grading_cost_usd),
+                          pokemon_rank=deal.pokemon_rank, copies=deal.listing.quantity)
+        if case is None:
+            st.bump("grading_no_top_reference")
+            return None
+        if case.spread_top <= 0:
+            st.bump("grading_top_below_cost")
+            return None
+        deal.grading = case
+        deal.ref_url = snap.url
+        status, reasons = classify_grading_row(deal.as_row(), trust=s.trust_confidence)
+        deal.status, deal.review_reasons = status, tuple(reasons)
+        if deal.match_confidence < s.min_match_confidence:
+            st.bump("low_confidence")
+        elif status == "OK":
+            st.bump("ok")
+        else:
+            st.bump("review")
+        return deal
+
     def _is_lp(self, listing) -> bool:
         return self.settings.lp_with_reference and \
             (listing.condition or "").strip().lower() == "lp"
@@ -553,6 +600,8 @@ class Scanner:
             return None
         if hit is not None:
             deal.pokemon, deal.pokemon_rank = hit.name, hit.rank
+        if s.grading_mode:
+            return self._process_grading(deal, st)
         if kind == KIND_SLAB:
             outcome = self._slab_reference(deal)
             if outcome != "ok":
@@ -656,6 +705,8 @@ class Scanner:
         index = TcgIndex()
         self._ensure_index([t[0] for t in targets], index)
         gate, thr = s.min_match_confidence, s.min_gross_margin
+        if s.grading_mode:
+            thr = float("-inf")  # sem crivo de desconto: quem decide é a conta da graduação
         deadline = (time.monotonic() + s.max_run_seconds) if s.max_run_seconds else None
         next_flush = time.time() + s.scan_interval_s
         passes = ([(KIND_RAW, False)] if s.scan_raw else []) + \

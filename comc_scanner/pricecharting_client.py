@@ -40,6 +40,7 @@ import dataclasses
 import datetime as _dt
 import gzip
 import html as html_mod
+import json
 import logging
 import os
 import re
@@ -105,6 +106,10 @@ class PcError(RuntimeError):
 
 _last_request_at = [0.0]
 _CODE_PREFIX = re.compile(r"^[A-Za-z0-9]{2,6}:\s*")
+# Marcador de era com hífen do catálogo tcgcsv ("XY - Evolutions", "SM - Team Up"): o
+# PriceCharting nomeia o console só pelo set ("pokemon-evolutions"). Sem tirar o
+# marcador, NENHUMA carta dos sets "XY - …"/"SM - …" casava página (achado 2026-11-16).
+_ERA_DASH_PREFIX = re.compile(r"^(?:XY|SM)\s+-\s+", re.I)
 # Palavras de variante toleradas no SLUG da busca (não confundir com ``variant_tokens``).
 _VARIANT_TOKENS = {"holo", "reverse", "1st", "edition", "shadowless", "unlimited", "promo"}
 
@@ -201,6 +206,65 @@ def parse_grade_prices(body: str) -> dict[str, float]:
                 if price is not None:
                     prices.setdefault(grade, price)
     return prices
+
+
+# --- censo de população + volume de vendas (modo grading) -----------------------
+# A página de produto embute o censo de população graduada como objeto JS, notas
+# 1..10, PSA e CGC (formato provado no pokemon-longterm-outlook, sonda de 2026-09-21,
+# e conferido de novo em 2026-11-16):
+#   VGPC.pop_data = {"cgc":[0,0,0,2,8,15,61,614,513,70],"psa":[1,0,2,4,20,56,243,1257,2837,754]};
+# O censo do PriceCharting é MENSAL e pode atrasar em set recente.
+_POP_DATA_RE = re.compile(r"VGPC\.pop_data\s*=\s*(\{.*?\})\s*;", re.S)
+_VOLUME_RE = re.compile(r"([\d,]+)\s+sales?\s+per\s+(day|week|month|year)")
+# Ordem das colunas da tabela principal (#price_data): a célula de volume
+# ("N sales per week") da PSA 10 é a 6ª (índice 5).
+_MAIN_TABLE_ORDER = ("used_price", "complete_price", "new_price", "graded_price",
+                     "box_only_price", "manual_only_price")
+PSA10_VOLUME_INDEX = _MAIN_TABLE_ORDER.index("manual_only_price")
+
+
+def parse_pop_report(body: str) -> dict[str, list[int]] | None:
+    """{'psa': [n1..n10], 'cgc': [n1..n10]} do censo embutido, ou None.
+
+    Listas SEMPRE com 10 posições (nota 1 → índice 0, nota 10 → índice 9). Página sem
+    o objeto, ou com objeto malformado, devolve None — nunca zeros inventados."""
+    m = _POP_DATA_RE.search(body or "")
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except ValueError:
+        return None
+    out: dict[str, list[int]] = {}
+    for key in ("psa", "cgc"):
+        v = data.get(key) if isinstance(data, dict) else None
+        if (not isinstance(v, list) or len(v) != 10
+                or not all(isinstance(x, int) and not isinstance(x, bool) and x >= 0 for x in v)):
+            return None
+        out[key] = list(v)
+    return out
+
+
+def parse_psa10_sales_per_month(body: str) -> float | None:
+    """Vendas/mês da PSA 10, normalizadas a partir de "N sales per day|week|month|year".
+
+    O PriceCharting escreve o volume nas células da tabela principal na MESMA ordem das
+    colunas de preço; a da PSA 10 é a de índice ``PSA10_VOLUME_INDEX``. Sem a tabela, ou
+    com menos células de volume que isso, devolve None (nunca chuta liquidez)."""
+    m = re.search(r'<table[^>]*id="price_data".*?</table>', body or "", re.S)
+    if not m:
+        return None
+    volumes: list[float] = []
+    for cell in re.findall(r"<td[^>]*>(.*?)</td>", m.group(0), re.S):
+        text = " ".join(html_mod.unescape(re.sub(r"<[^>]+>", " ", cell)).split())
+        vm = _VOLUME_RE.search(text)
+        if vm:
+            n = float(vm.group(1).replace(",", ""))
+            volumes.append(round({"day": n * 30, "week": n * 4.33,
+                                  "month": n, "year": n / 12}[vm.group(2)], 1))
+    if len(volumes) <= PSA10_VOLUME_INDEX:
+        return None
+    return volumes[PSA10_VOLUME_INDEX]
 
 
 _SALES_DIV_RE = re.compile(r'<div class="(completed-auctions-[^"]+)"')
@@ -513,8 +577,10 @@ def _name_tokens(card_name) -> list[str]:
 
 
 def clean_set_name(set_label) -> str:
-    """'SV: Scarlet & Violet 151' → 'Scarlet & Violet 151'; 'EX Emerald (em)' → 'EX Emerald'."""
+    """'SV: Scarlet & Violet 151' → 'Scarlet & Violet 151'; 'EX Emerald (em)' → 'EX Emerald';
+    'XY - Evolutions' → 'Evolutions'; 'SM - Team Up' → 'Team Up'."""
     s = _CODE_PREFIX.sub("", str(set_label or "").strip())
+    s = _ERA_DASH_PREFIX.sub("", s)
     return s.rsplit(" (", 1)[0].strip() if " (" in s else s
 
 
@@ -595,6 +661,86 @@ def _product_page(card_name, number, set_label, cache_dir: str | None = None) ->
     if not parse_grade_prices(page) and not parse_sales(page):
         raise PcError(f"PriceCharting sem tabelas de preço/vendas em {url} (layout mudou?)")
     return url, page
+
+
+# --- página da VARIANTE exata (modo grading) -----------------------------------
+# O PriceCharting tem página PRÓPRIA por variante de impressão ("charmander-9" e
+# "charmander-reverse-holo-9"), cada uma com o seu censo e as suas vendas (conferido em
+# 2026-11-16: Charmander #9 de Evolutions — comum 985 PSA 10 em 3.055; reverse 754 em
+# 5.174). O censo só vale para a variante da página, então o modo grading escolhe a
+# página pela variante da listagem — nunca usa o censo da carta comum numa reverse.
+_PRINT_VARIANT_SLUG_WORD = {"reverse": "reverse", "1st": "1st", "shadowless": "shadowless"}
+# Tokens de ``variant_tokens`` que NÃO mudam a página (o set de promos já é o console).
+_PAGE_NEUTRAL_VARIANTS = frozenset({"promo"})
+
+
+def choose_variant_path(paths: list[str], card_name, number, set_label,
+                        variants: frozenset[str] = frozenset()) -> str | None:
+    """Path da página da MESMA variante de impressão, ou None.
+
+    ``variants`` = ``variant_tokens`` da listagem. Só três variantes têm página própria
+    reconhecida (reverse, 1st edition, shadowless); "promo" é neutro. Qualquer outro
+    token (staff, prerelease, cosmos, error, signed, metal, jumbo…) → None: sem página
+    confiável, o chamador reporta "sem página da variante" em vez de usar a página
+    errada. A página escolhida tem EXATAMENTE as palavras de variante pedidas no slug."""
+    wanted = frozenset(variants) - _PAGE_NEUTRAL_VARIANTS
+    if not wanted <= set(_PRINT_VARIANT_SLUG_WORD):
+        return None
+    need = {_PRINT_VARIANT_SLUG_WORD[v] for v in wanted}
+    out = []
+    for p in paths:
+        if not (slug_matches(p, card_name, number) and console_matches(p, set_label)):
+            continue
+        slug_words = set(p.rsplit("/", 1)[-1].lower().split("-"))
+        if slug_words & set(_PRINT_VARIANT_SLUG_WORD.values()) != need:
+            continue
+        out.append(p)
+    if not out:
+        return None
+    return min(out, key=lambda p: len(p.rsplit("/", 1)[-1]))
+
+
+@dataclass(frozen=True, slots=True)
+class GradingSnapshot:
+    """Tudo que o modo grading lê de UMA página de carta (da variante exata)."""
+    url: str
+    refs: dict[str, SalesRef | None]        # chave da nota ("PSA 10") → mediana de vendas
+    pop: dict[str, list[int]] | None        # censo {"psa": [1..10], "cgc": [1..10]}
+    psa10_sales_per_month: float | None     # célula de volume do PriceCharting (só PSA 10)
+    comps_180d: dict[str, int]              # nº de vendas comparáveis em 180 d, por nota
+
+
+def grading_snapshot(card_name, number, set_label, grades, cache_dir: str | None = None,
+                     variants: frozenset[str] = frozenset()) -> GradingSnapshot | None:
+    """Nome+número+set+variante → página EXATA da variante → referências por nota
+    (mesma regra dos slabs: mediana de vendas da MESMA certificadora+nota+variante),
+    censo de população e volume. None = nenhuma página casa carta+variante (nunca usa
+    a página de outra variante). Rede/bloqueio/página sem tabelas → ``PcError``."""
+    set_name = clean_set_name(set_label)
+    base_name = clean_card_name(card_name)
+    num = norm_number(number)
+    query = " ".join(p for p in ("pokemon", set_name, base_name, num) if p)
+    body = fetch_page(f"{BASE_URL}/search-products?q={urllib.parse.quote(query)}&type=prices",
+                      cache_dir=cache_dir)
+    path = choose_variant_path(search_card_paths(body), card_name, number, set_label, variants)
+    if not path:
+        log.info("PC: sem página da variante %s para '%s' #%s (%s).",
+                 sorted(variants) or "comum", base_name, num, set_name)
+        return None
+    url = BASE_URL + path
+    page = fetch_page(url, cache_dir=cache_dir)
+    sales = parse_sales(page)
+    if not parse_grade_prices(page) and not sales:
+        raise PcError(f"PriceCharting sem tabelas de preço/vendas em {url} (layout mudou?)")
+    refs: dict[str, SalesRef | None] = {}
+    comps_180d: dict[str, int] = {}
+    for grade in grades:
+        comps = comparable_sales(sales, grade.grader, grade.value, grade.qualifier, variants)
+        refs[grade.key] = sales_reference(comps, url, grade.label, allow_thin=True)
+        comps_180d[grade.key] = len(recent_only(comps, SALES_MAX_AGE_DAYS))
+    return GradingSnapshot(url=url, refs=refs, pop=parse_pop_report(page),
+                           psa10_sales_per_month=parse_psa10_sales_per_month(page),
+                           comps_180d=comps_180d)
 
 
 # --- API usada pelo pipeline ---------------------------------------------------

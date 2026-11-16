@@ -26,6 +26,14 @@ certificadora+nota+variante; coluna do PriceCharting nunca é referência). Todo
 Pokémon entram por padrão; `--iconic-only` e `--chase-only` são restrições opcionais.
 Desconto mínimo **20%** (`(ref − COMC)/ref`); piso US$10.
 
+**Modo grading** (operador 2026-11-16): se o pedido for achar carta solta para
+**mandar graduar** ("candidatas a grading", "raw para PSA 10", "modo grading"), rode
+`python -m comc_scanner scan --group <N> --grading` (rota PSA; `--grader CGC` para a
+CGC; teto US$100, sem piso) e entregue com
+`python comc_summary.py results/comc_deals_grading_grupo<N>_latest.json -o results/comc-grading-grupo<N>-<data>.md --group <N>`.
+A tabela e as hipóteses da conta estão em `CLAUDE.md` → "Modo grading". A taxa do censo
+é histórica: nunca apresente como chance da cópia, nem recomende compra.
+
 ## Passo 1 — confirmar o escopo ausente
 
 Se o operador não informou grupo nem sets, pergunte qual dos 12 grupos, `all` ou quais
