@@ -21,3 +21,11 @@
 `python -m comc_scanner scan --era all --raw-only` — cartas soltas, todas as eras.
 
 Usar cache novo por execução, gerar com comc_summary.py e colar a entrega no chat. A revisão sem referência é separada dos candidatos com preço validado. Não publicar resultados no GitHub.
+
+## Modo grading — 2026-11-16
+
+- Tese do operador: carta solta NM da COMC como candidata a ser graduada. Teto de US$100 por carta e SEM piso de preço neste modo; o preço não é o único filtro — Pokémon desejado, pouca oferta e muita procura selecionam.
+- `python -m comc_scanner scan --group N --grading` (rota PSA por padrão; `--grader CGC`). Só carta solta com condição NM exata; slabs, LP e EX-NM ficam fora.
+- Referência das notas = mediana de vendas concluídas da mesma carta, variante, certificadora e nota, lida na página da variante exata. Coluna do PriceCharting e nota vizinha continuam proibidas como referência.
+- Taxa de nota máxima = censo de população (histórico, mensal). Não é a chance da cópia: fotos, centralização e desgaste continuam pendentes de conferência do operador.
+- OK valida identificação, referências e censo; não aprova aquisição. Custos reais (graduar, frete, taxa de venda, impostos) são do operador — o scanner só soma o custo de graduar informado.

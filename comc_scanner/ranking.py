@@ -47,7 +47,11 @@ def spread_of(row: dict) -> float:
 
 
 def sort_key(row: dict) -> tuple[float, float, float, int]:
-    """Chave para ``sorted(...)``: menor = melhor (negativos nas métricas)."""
+    """Chave para ``sorted(...)``: menor = melhor (negativos nas métricas). Linha do
+    modo grading (``mode == "grading"``) usa a ordem própria (pontos → valor esperado)."""
+    if str(row.get("mode") or "") == "grading":
+        from .grading_mode import grading_sort_key  # import tardio (evita ciclo)
+        return grading_sort_key(row)
     try:
         rank = int(row.get("pokemon_rank") or UNRANKED)
     except (TypeError, ValueError):

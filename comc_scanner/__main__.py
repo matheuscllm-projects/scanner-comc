@@ -10,6 +10,7 @@ from .groups import SCAN_GROUPS, VALID_GROUP_NUMBERS, describe_groups, group_set
 from .logging_setup import setup_logging
 from .languages import parse_languages
 from .grading import parse_grade
+from .grading_mode import VALID_GRADERS, effective_cost, plan_for
 from .pipeline import Scanner
 
 log = logging.getLogger("comc_scanner.cli")
@@ -56,6 +57,28 @@ def _grades(value: str) -> frozenset[str]:
     return out
 
 
+def _grader(value: str) -> str:
+    key = (value or "").strip().upper()
+    if key not in VALID_GRADERS:
+        raise argparse.ArgumentTypeError(
+            f"rota de grading inválida: {value!r} (use {', '.join(VALID_GRADERS)})")
+    return key
+
+
+def _positive_float(value: str) -> float:
+    try:
+        out = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"esperava um número, recebi {value!r}") from exc
+    if out <= 0:
+        raise argparse.ArgumentTypeError("o custo de graduar precisa ser maior que zero")
+    return out
+
+
+# Modo grading (operador, 2026-11-16): teto de US$100 por carta, sem piso de preço.
+GRADING_DEFAULT_MAX_PRICE = 100.0
+
+
 def _add_scan_args(p: argparse.ArgumentParser) -> None:
     sel = p.add_mutually_exclusive_group()
     sel.add_argument("--group", help="grupo canônico 1-12 (ver `list-groups`) ou `all` "
@@ -87,6 +110,14 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
                    help="desliga o filtro de Pokémon icônicos (analisa todas as cartas)")
     p.add_argument("--chase-only", action="store_true",
                    help="só raridades de perseguição (dropa Common/Uncommon/Rare)")
+    p.add_argument("--grading", action="store_true",
+                   help="modo grading: carta solta NM como candidata a graduar (sem piso de "
+                        "preço, teto US$100 por padrão; troca o crivo de desconto pela conta "
+                        "custo × nota máxima × taxa do censo)")
+    p.add_argument("--grader", type=_grader,
+                   help="rota do modo grading: PSA (10/9, padrão) ou CGC (10 Gem/9.5)")
+    p.add_argument("--grading-cost", type=_positive_float,
+                   help="custo de graduar por carta em US$ (padrão da rota: PSA 59, CGC 10)")
     p.add_argument("--min-confidence", type=float, help="confiança mínima de match p/ a lista")
     p.add_argument("--max-pages", type=int, help="máx. de páginas COMC por set/passada (0=todas)")
     p.add_argument("--max-run-seconds", type=int, help="orçamento de tempo (0=ilimitado)")
@@ -154,7 +185,29 @@ def _apply_overrides(settings, args) -> None:
         settings.iconic_only = False
     if getattr(args, "iconic_only", False):
         settings.iconic_only = True
+    if getattr(args, "grader", None):
+        settings.grading_grader = args.grader
+    if getattr(args, "grading_cost", None) is not None:
+        settings.grading_cost_usd = args.grading_cost
+    if getattr(args, "grading", False):
+        _apply_grading_mode(settings, args)
     settings.comc_headless = False  # Cloudflare da COMC só limpa em navegador com janela
+
+
+def _apply_grading_mode(settings, args) -> None:
+    """Liga o modo grading: só carta solta NM (slabs e LP/EX-NM ficam fora), sem piso
+    de preço e com teto de US$100 — salvo `--min-price`/`--max-price`/`MAX_COMC_PRICE`
+    explícitos. Rota inválida no `.env` é erro explícito, nunca cai num padrão calado."""
+    plan = plan_for(settings.grading_grader)  # ValueError → parser.error no main
+    settings.grading_mode = True
+    settings.grading_grader = plan.grader
+    settings.grading_cost_usd = effective_cost(plan, settings.grading_cost_usd)
+    settings.scan_raw, settings.scan_slabs = True, False
+    settings.raw_conditions = frozenset({"nm"})
+    if getattr(args, "min_price", None) is None:
+        settings.min_comc_price = 0.0
+    if getattr(args, "max_price", None) is None and settings.max_comc_price <= 0:
+        settings.max_comc_price = GRADING_DEFAULT_MAX_PRICE
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -198,11 +251,13 @@ def main(argv: list[str] | None = None) -> int:
         print(describe_groups())
         return 0
     setup_logging(logging.INFO)
+    if getattr(args, "grading", False) and getattr(args, "slabs_only", False):
+        parser.error("--grading analisa carta solta; não combina com --slabs-only")
     try:
         settings = load_settings()
+        _apply_overrides(settings, args)
     except ValueError as exc:
         parser.error(str(exc))
-    _apply_overrides(settings, args)
 
     if args.command == "warm":
         ok = Scanner(settings).warm_profile(wait_s=args.wait, url=args.url)
@@ -227,11 +282,14 @@ def main(argv: list[str] | None = None) -> int:
     except argparse.ArgumentTypeError as exc:
         parser.error(str(exc))
     scanner = Scanner(settings)
+    # Modo grading grava em arquivo próprio (`comc_deals_grading_<escopo>_latest.json`):
+    # nunca sobrescreve o resultado do scan de arbitragem do mesmo escopo.
+    prefix = "grading_" if settings.grading_mode else ""
     if groups is None:
         era = _resolve_era(args, settings)
-        scanner.run_scan(era, label=era)
+        scanner.run_scan(era, label=prefix + era)
         return 2 if scanner.aborted else 0
-    label = "all" if len(groups) > 1 else f"grupo{groups[0]}"
+    label = prefix + ("all" if len(groups) > 1 else f"grupo{groups[0]}")
     best = None
     failed = 0
     for n in groups:

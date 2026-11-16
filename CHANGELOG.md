@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.5.0 — 2026-11-16 — modo grading (carta solta NM como candidata a graduar)
+
+Pedido do operador (2026-11-16): na COMC a melhor chance de ganho é achar carta solta
+em bom estado e mandar graduar — teto de US$100 por carta, sem piso de preço, e o preço
+não é o único filtro (Pokémon desejado, pouca oferta, muita procura).
+
+- **`scan --grading`** (+ `--grader PSA|CGC`, `--grading-cost`): só a passada de cartas
+  soltas NM; o crivo de desconto sai e entra a conta da graduação
+  (`comc_scanner/grading_mode.py`): custo total = COMC + graduar; `Empate%` = chance
+  mínima de nota máxima para a conta fechar; valor esperado = taxa10 × nota máxima +
+  taxa9 × 2ª nota + resto × valor cru − custo. Pontos 0–100 (Pokémon, escassez, procura,
+  economia; escassez/procura com as faixas do `pokemon-longterm-outlook`) ordenam a
+  tabela. Piso US$0 e teto US$100 por padrão neste modo (`--min-price`/`--max-price`
+  explícitos vencem). Resultado em arquivo próprio:
+  `results/comc_deals_grading_<escopo>_latest.json`.
+- **Censo e volume do PriceCharting** (`parse_pop_report`,
+  `parse_psa10_sales_per_month`, portados do outlook) e **página da variante exata**
+  (`choose_variant_path`, `grading_snapshot`): reverse, 1st edition e shadowless têm
+  página, censo e vendas próprios; a carta comum nunca empresta censo a uma reverse.
+- **Entrega**: `comc_summary.py` reconhece o JSON do modo (`mode: "grading"`) e gera a
+  tabela própria (`reporter.render_grading_table`), dois baldes (OK / MATCH_REVIEW) e o
+  rodapé com as hipóteses. Motivos de revisão novos: `cru:mid|low`, `censo: …`,
+  `censo-CGC-aproximado`, `VE<0`, `retorno-extremo(≥300%)`.
+- **Correção que também muda o scan de arbitragem**: `clean_set_name` passa a tirar o
+  marcador de era com hífen (`XY - Evolutions` → `Evolutions`, `SM - Team Up` →
+  `Team Up`). Antes, nenhuma carta dos sets `XY - …`/`SM - …` casava página no
+  PriceCharting: slabs desses sets saíam sempre "sem referência", LP sem referência e o
+  link `[referência]` caía no TCGplayer. Agora eles ganham referência — a guarda de set
+  continua bidirecional (console == set, nada de tiragem japonesa).
+- **Prova (2026-11-16, referências ao vivo)**: 13 anúncios NM de Evolutions reverse
+  (preços lidos na COMC no dia) → 11 OK, 1 revisão, 1 acima do teto; página salva de
+  Evolving Skies (96 anúncios, captura de 2026-09-02) → 30 candidatas, 17 "nota máxima
+  não paga o custo", 23 sem venda comparável, ~4 min.
+- **Pendências conhecidas**: censo diário via GemRate (hoje só no outlook; a fonte
+  devolve 403 fora do PC do operador); `XY Base Set`, `SM Base Set`, `Pokemon GO` e
+  subsets ainda sem página por nome; vendas da própria COMC ("4 year sales") não
+  entram na procura; rota CGC sempre em revisão (censo sem 9.5/Pristine).
+- **Validação**: 366 testes offline (59 novos em `tests/test_grading_mode.py`, com
+  duas páginas reais do PriceCharting de 2026-11-16).
+
 ## 0.4.4 — 2026-09-11 — filtros personalizados + guardas de plausibilidade
 
 Parecer do operador (2026-09-06) sobre o PR #25 (fechado como obsoleto): sinalizar, nunca

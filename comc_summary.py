@@ -32,8 +32,9 @@ from pathlib import Path
 from comc_scanner import groups
 from comc_scanner.models import STATUS_OK
 from comc_scanner.ranking import sort_rows
+from comc_scanner.grading_mode import classify_grading_row, plan_for
 from comc_scanner.reporter import (EXTREME_DISCOUNT_PERCENT, TRUST_CONFIDENCE, classify_row,
-                                   funnel_lines, render_rows_table)
+                                   funnel_lines, render_grading_table, render_rows_table)
 
 CLEAN_TITLE = "## 🟢 Oportunidades OK (match confiável + preço de referência real)"
 REVIEW_TITLE = ("## ⚠️ MATCH_REVIEW — validar manualmente (confiança baixa, preço mid/low, "
@@ -168,8 +169,105 @@ def sensitivity_sections(ok: list[dict], review: list[dict], thresholds: list[in
     return lines
 
 
+# ── modo grading (2026-11-16) ──────────────────────────────────────────────────
+
+GRADING_OK_TITLE = ("## 🟢 Candidatas OK (carta identificada, nota máxima com ≥3 vendas, "
+                    "censo utilizável, valor esperado ≥ 0)")
+GRADING_REVIEW_TITLE = ("## ⚠️ REVISAR — validar manualmente (confiança baixa, valor cru "
+                        "mid/low, vendas<3, censo ausente/fino/aproximado, VE<0 ou "
+                        "retorno extremo)")
+
+
+def is_grading_payload(payload: dict) -> bool:
+    return str(payload.get("mode") or "") == "grading"
+
+
+def split_grading_buckets(payload: dict) -> tuple[list[dict], list[dict], int]:
+    """(ok, revisar, n_low_confidence) do modo grading, pela mesma regra do scan
+    (`classify_grading_row` com o `trust_confidence` do run). Nada é dropado."""
+    trust = _trust(payload)
+    low_conf = list(payload.get("low_confidence") or [])
+    ok: list[dict] = []
+    review: list[dict] = []
+    for row in list(payload.get("deals") or []):
+        status, _ = classify_grading_row(row, trust=trust)
+        (ok if status == STATUS_OK else review).append(row)
+    review.extend(low_conf)
+    return sort_rows(ok), sort_rows(review), len(low_conf)
+
+
+def _grading_section(title: str, rows: list[dict], trust: float) -> list[str]:
+    return [title, "", render_grading_table(rows, trust) if rows else EMPTY_BUCKET, ""]
+
+
+def build_grading_markdown(payload: dict, group: int | None = None) -> str:
+    """Entrega do modo grading: cabeçalho (rota, custo, teto, funil), dois baldes na
+    ordem do ranking e o rodapé com as hipóteses da conta. Sem recomendação de compra."""
+    ok, review, n_low = split_grading_buckets(payload)
+    trust = _trust(payload)
+    scope = payload.get("scope") or "?"
+    grupo = f"grupo {group}" if group else f"escopo {scope}"
+    grader = str(payload.get("grading_grader") or "PSA")
+    plan = plan_for(grader)
+    cost = payload.get("grading_cost_usd")
+    cap = payload.get("max_comc_price")
+    floor = payload.get("min_comc_price")
+    header = [
+        "# COMC → graduar: cartas soltas NM candidatas a grading — entrega do scan",
+        "",
+        f"- Snapshot: {payload.get('generated_utc', '?')} (UTC) · {grupo}",
+        f"- OK: {len(ok)} · REVISAR: {len(review)} (sendo {n_low} do balde low-confidence)",
+        f"- Rota: {plan.top.label} (2ª nota: {plan.second.label}) · custo de graduar: "
+        f"US${cost} por carta · teto COMC: US${cap if cap else 'sem teto'} · piso: "
+        f"US${floor if floor else 'sem piso'} · condição: NM · idiomas: "
+        f"{', '.join(payload.get('languages') or ['en'])} · Pokémon: "
+        f"{'lista icônica' if payload.get('iconic_only') else 'todos'}",
+    ]
+    funnel = payload.get("funnel") or {}
+    if funnel:
+        header.append("- Funil: " + " · ".join(funnel_lines(funnel)))
+    warning = _top_n_warning(payload)
+    if warning:
+        header.append(warning)
+    header.append("")
+    body = (_grading_section(GRADING_OK_TITLE, ok, trust)
+            + _grading_section(GRADING_REVIEW_TITLE, review, trust))
+    coverage = payload.get("coverage") or {}
+    for cov_scope, info in coverage.items():
+        missing = info.get("without_validated_path") or []
+        if missing:
+            body.extend([f"Cobertura {cov_scope}: {len(missing)} sets sem caminho COMC validado: "
+                         + ", ".join(missing), ""])
+    footer = [
+        "_Como ler: **Custo$** = preço COMC + custo de graduar. **Nota máx$** e **2ª nota$** = "
+        "mediana de vendas concluídas da mesma carta, variante, certificadora e nota "
+        "(PriceCharting; `Ref` mostra quantas vendas e de quando). **Crua$** = referência da "
+        "carta solta NM (TCGplayer market). **Taxa nota máx%** = notas máximas ÷ total "
+        "graduado da carta no censo. **Empate%** = chance mínima de nota máxima para a conta "
+        "fechar. **Retorno esperado%** = valor esperado ÷ custo, onde valor esperado = taxa da "
+        "nota máxima × Nota máx$ + taxa da 2ª nota × 2ª nota$ + resto × Crua$ − Custo$. "
+        "**Pontos** (0–100) = Pokémon 25 + escassez 25 + procura 25 + economia 25; ordena a "
+        "tabela (pontos → retorno esperado → spread da nota máxima)._",
+        "",
+        "_Limites: a taxa do censo é HISTÓRICA — quem gradua escolhe as melhores cópias, então "
+        "ela não é a chance desta cópia; confira frente e verso no link da oferta. O censo vem "
+        "do PriceCharting, é mensal e pode atrasar em set recente. No valor esperado, nota "
+        "abaixo da 2ª vale o valor cru, e 2ª nota sem ≥3 vendas também (`2ª-nota-sem-ref`). "
+        "`Vendas/mês` com `≥` é piso (amostra de 180 dias; a página lista só ~30 vendas por "
+        "nota). Valores brutos: sem taxa de venda, frete ou imposto além do custo de graduar. "
+        "A pontuação é régua de ordenação, não previsão. `retorno-extremo` = retorno esperado "
+        "bom demais (≥300%): conferir as vendas da nota máxima antes de confiar. "
+        "`baixa-liquidez(365d)` é nota, não muda o status. O scanner reporta dados; não é "
+        "recomendação de compra._",
+        "",
+    ]
+    return "\n".join(header + body + footer)
+
+
 def build_markdown(payload: dict, group: int | None = None,
                    sensitivity: list[int] | None = None) -> str:
+    if is_grading_payload(payload):
+        return build_grading_markdown(payload, group=group)
     ok, review, n_low = split_buckets(payload)
     scope = payload.get("scope") or payload.get("era", "?")
     grupo = f"grupo {group}" if group else f"escopo {scope}"

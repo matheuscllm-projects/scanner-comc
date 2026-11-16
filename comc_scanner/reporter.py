@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 
 from .config import Settings
+from .grading_mode import classify_grading_row, grading_row_notes, is_grading_row
 from .models import STATUS_OK, STATUS_REVIEW, Deal
 from .ranking import sort_rows
 
@@ -81,7 +82,8 @@ _TABLE_COLS = [
     ("acquisition_review", "Revisão aquisição"),
     ("links", "Links"),
 ]
-_MAXW = {"card_number": 34, "set": 26, "listing_type": 20, "pokemon": 14}
+_MAXW = {"card_number": 34, "set": 26, "listing_type": 20, "pokemon": 14,
+         "grading_type": 28}
 
 # Rótulos do funil (spec §13) — usados no log final e no cabeçalho da entrega.
 # Ordem = ordem lógica do funil (triagem → match → referência → limiar → baldes).
@@ -109,6 +111,10 @@ FUNNEL_LABELS = [
     ("lp_no_reference", "Raw LP sem ≥3 vendas LP comparáveis — sem referência"),
     ("lp_pc_error", "Raw LP com ERRO na fonte PriceCharting"),
     ("below_discount", "Descartadas: desconto abaixo do mínimo"),
+    ("grading_pc_error", "Grading: ERRO na fonte PriceCharting (rede/bloqueio/layout)"),
+    ("grading_no_page", "Grading: sem página da carta/variante no PriceCharting"),
+    ("grading_no_top_reference", "Grading: nota máxima sem venda comparável — sem referência"),
+    ("grading_top_below_cost", "Grading: nem a nota máxima paga o custo total (COMC + graduar)"),
     ("pc_link_missing", "Raw aprovadas sem página no PriceCharting (link [referência] = TCGplayer)"),
     ("pc_link_error", "Raw aprovadas com ERRO na fonte PriceCharting ao buscar o link (= TCGplayer)"),
     ("raw_plausibility_ok", "Raw aprovadas com plausibilidade (mediana de vendas de carta solta) calculada"),
@@ -315,6 +321,81 @@ def render_rows_table(rows: list[dict], trust: float = TRUST_CONFIDENCE,
     return "\n".join(lines)
 
 
+# --- modo grading (2026-11-16) -------------------------------------------------
+# Tabela própria: a pergunta deixa de ser "está barata contra a referência?" e vira
+# "vale mandar graduar?". Fonte ÚNICA do formato, como a tabela de arbitragem.
+_GRADING_COLS = [
+    ("rank", "#"),
+    ("grading_score", "Pontos"),
+    ("grading_ev_roi", "Retorno esperado%"),
+    ("grading_total_cost", "Custo$"),
+    ("comc_price", "COMC$"),
+    ("grading_top", "Nota máx$"),
+    ("grading_second", "2ª nota$"),
+    ("grading_raw_value", "Crua$"),
+    ("grading_gem_rate", "Taxa nota máx%"),
+    ("grading_breakeven", "Empate%"),
+    ("grading_pop", "Pop nota máx/total"),
+    ("grading_sales", "Vendas/mês"),
+    ("grading_copies", "Cópias COMC"),
+    ("pokemon", "Pokémon"),
+    ("card_number", "Carta"),
+    ("set", "Set"),
+    ("grading_type", "Tipo"),
+    ("grading_ref", "Ref"),
+    ("confidence", "Conf"),
+    ("status", "Status"),
+    ("links", "Links"),
+]
+
+
+def _fmt(value: object, digits: int = 2, dash: str = "n/d") -> str:
+    v = _float_or_none(value)
+    return dash if v is None else f"{v:.{digits}f}"
+
+
+def grading_table_header_lines() -> list[str]:
+    header = "| " + " | ".join(label for _, label in _GRADING_COLS) + " |"
+    sep = "| " + " | ".join("---" for _ in _GRADING_COLS) + " |"
+    return [header, sep]
+
+
+def _grading_status_cell(row: dict, trust: float = TRUST_CONFIDENCE) -> str:
+    status, reasons = classify_grading_row(row, trust=trust)
+    return " · ".join([status, *reasons, *grading_row_notes(row)])
+
+
+def render_grading_row_line(row: dict, rank: int, trust: float = TRUST_CONFIDENCE) -> str:
+    """Uma linha da tabela do modo grading, a partir da linha plana (Deal.as_row() ou o
+    mesmo dict relido do JSON). Valor ausente vira "n/d" — nunca zero inventado."""
+    row = dict(row)
+    row["rank"] = rank
+    top, second = row.get("grading_top_label") or "nota máx", row.get("grading_second_label") or "2ª"
+    row["grading_ev_roi"] = _fmt(row.get("grading_ev_roi_pct"), 1)
+    row["grading_top"] = f"{_fmt(row.get('grading_top_price'))} ({top})"
+    row["grading_second"] = (f"{_fmt(row.get('grading_second_price'))} ({second})"
+                             if row.get("grading_second_price") is not None else f"n/d ({second})")
+    row["grading_gem_rate"] = _fmt(row.get("grading_gem_rate_pct"), 1)
+    row["grading_breakeven"] = _fmt(row.get("grading_breakeven_pct"), 1)
+    pop_top, pop_total = row.get("grading_pop_top"), row.get("grading_pop_total")
+    row["grading_pop"] = "n/d" if pop_top is None or pop_total is None else f"{pop_top}/{pop_total}"
+    sales = _float_or_none(row.get("grading_sales_per_month"))
+    row["grading_sales"] = "n/d" if sales is None else (
+        f"≥{sales:g}" if row.get("grading_sales_source") == "amostra-180d" else f"{sales:g}")
+    sub_type = str(row.get("sub_type") or "").strip()
+    row["grading_type"] = " · ".join(p for p in (str(row.get("listing_type") or ""), sub_type) if p)
+    row["grading_ref"] = f"PC {row.get('grading_top_ref_label') or ''}".strip()
+    row["status"] = _grading_status_cell(row, trust)
+    row["links"] = _links_cell(row)
+    return "| " + " | ".join(_cell(k, row.get(k, "")) for k, _ in _GRADING_COLS) + " |"
+
+
+def render_grading_table(rows: list[dict], trust: float = TRUST_CONFIDENCE) -> str:
+    lines = grading_table_header_lines()
+    lines.extend(render_grading_row_line(row, rank, trust) for rank, row in enumerate(rows, 1))
+    return "\n".join(lines)
+
+
 def render_markdown(deals: list[Deal], label: str, top_n: int,
                     trust: float = TRUST_CONFIDENCE,
                     extreme_pct: int = EXTREME_DISCOUNT_PERCENT) -> str:
@@ -323,6 +404,10 @@ def render_markdown(deals: list[Deal], label: str, top_n: int,
     if not deals:
         return title + "\n\n_(nenhum deal acima do limiar ainda)_"
     rows = sort_rows([d.as_row() for d in deals])[:top_n or None]
+    if rows and all(is_grading_row(r) for r in rows):
+        title = (f"### COMC grading — {label} — {len(rows)} candidatas "
+                 "(pontos → retorno esperado → spread da nota máxima)")
+        return "\n".join([title, "", render_grading_table(rows, trust)])
     return "\n".join([title, "", render_rows_table(rows, trust, extreme_pct)])
 
 
@@ -384,6 +469,10 @@ class Reporter:
             "trust_confidence": self.settings.trust_confidence,
             "extreme_discount_percent": self.settings.extreme_discount_percent,
             "raw_plausibility": self.settings.raw_plausibility,
+            "mode": "grading" if self.settings.grading_mode else "arbitrage",
+            "grading_grader": self.settings.grading_grader if self.settings.grading_mode else None,
+            "grading_cost_usd": self.settings.grading_cost_usd if self.settings.grading_mode else None,
+            "max_comc_price": self.settings.max_comc_price,
             "top_n": self.settings.top_n,
             "count": len(rows),
             "funnel": dict(stats or {}),

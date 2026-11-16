@@ -29,7 +29,15 @@ python comc_summary.py results/comc_deals_grupo1_latest.json -o results/comc-gru
 python -m comc_scanner scan --sets "Base Set" --era vintage --raw-only --min-discount 25
 python -m comc_scanner scan --sets "SV: Scarlet & Violet 151" --languages ja --slabs-only --grades "PSA 10,TAG 10"
 python -m comc_scanner scan --group 9 --languages en --conditions "NM,LP" --grades "PSA 9,PSA 10,BGS 9.5"
+python -m comc_scanner scan --group 9 --grading                 # loose NM cards as grading candidates
+python -m comc_scanner scan --group 11 --grading --grader CGC --grading-cost 12
 ```
+
+`--grading` replaces the discount gate with a grading calculation per loose NM card
+(no price floor, US$100 ceiling by default): total cost (listing + grading fee) against
+the sold-comps median of the top grade for the exact print variant, the historical
+top-grade rate from the population census, and a 0–100 ordering score. It reports data;
+it is not a purchase recommendation. Details in [`CLAUDE.md`](CLAUDE.md).
 
 ### Filtros personalizados
 

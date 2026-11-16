@@ -40,7 +40,7 @@ Erros recorrentes (3 famílias — detalhe no manual):
 2. **Git:** `main` local defasado por squash-merge PARECE pendência; teste real = `git diff --stat origin/main <branch>` vazio.
 3. **Honestidade de preço:** inflação de referência, fallback tratado como real, NM frouxo → sempre validar versão/condição e rotular fallback.
 
-## O que este projeto é (v0.4.4, scanner ÚNICO)
+## O que este projeto é (v0.5.0, scanner ÚNICO + modo grading)
 
 Scanner de arbitragem da **COMC** para cartas de Pokémon, num único fluxo:
 
@@ -89,6 +89,72 @@ COMC (set-path browse, 2 passadas por set: cartas soltas + slabs)
 - Roda **grátis**, no PC do operador, via Chrome real **headful** (patchright resolve o
   Cloudflare Turnstile; headless NUNCA fura). Recorrência **manual**.
 
+## 🎓 Modo grading (`scan --grading`, operador 2026-11-16)
+
+**Tese do operador:** na COMC a melhor chance de ganho não é a arbitragem, é achar
+carta solta em bom estado, de Pokémon desejado, com pouca oferta e muita procura, e
+mandar graduar. **Teto de US$100 por carta, SEM piso de preço** (exceção explícita ao
+piso de US$10 da frota, só neste modo): o preço é um teto; quem seleciona são os outros
+filtros.
+
+```
+COMC (só a passada de cartas soltas, condição NM exata)
+ → identificar a carta (mesmo matcher) → SEM crivo de desconto
+ → PriceCharting, página da VARIANTE exata (comum / reverse / 1st / shadowless):
+     referência da nota máxima e da 2ª nota = mediana de vendas da mesma
+     certificadora+nota+variante (regra dos slabs) · censo de população · volume
+ → a conta:  custo = COMC + custo de graduar
+             empate% = (custo − valor cru) / (nota máxima − valor cru)
+             valor esperado = taxa10 × nota máx + taxa9 × 2ª nota + resto × cru − custo
+ → pontos 0–100 (Pokémon 25 + escassez 25 + procura 25 + economia 25) → ranking
+ → results/comc_deals_grading_<escopo>_latest.json → comc_summary.py (tabela própria)
+```
+
+- **Rotas** (`--grader`): `PSA` (PSA 10 / PSA 9, custo padrão US$59) e `CGC` (CGC 10 Gem
+  Mint / CGC 9.5, custo padrão US$10). `--grading-cost` / `GRADING_COST_USD` trocam o
+  custo por carta (ponha aí serviço + frete rateado). Valores **brutos**: sem taxa de
+  venda nem imposto.
+- **Página da variante exata** (`pricecharting_client.choose_variant_path`): reverse,
+  1st edition e shadowless têm página, censo e vendas PRÓPRIOS. Exemplo real
+  (2026-11-16, Charmander #9 de Evolutions): comum = 985 PSA 10 em 3.055 graduadas,
+  PSA 10 a US$116; reverse = 754 em 5.174, PSA 10 a US$603. Variante sem página
+  reconhecida (staff, prerelease, cosmos, erro…) → `grading_no_page`; nunca usa a
+  página da carta comum.
+- **Saídas do funil**: fonte falhou (`grading_pc_error`), sem página
+  (`grading_no_page`), nota máxima sem venda comparável (`grading_no_top_reference`)
+  e nota máxima que não paga o custo (`grading_top_below_cost`). O resto entra na
+  tabela.
+- **Status**: `OK` = carta identificada (confiança ≥ 0.90), valor cru `market`, nota
+  máxima com ≥3 vendas, censo utilizável e valor esperado ≥ 0. `MATCH_REVIEW` com
+  motivo: `confiança<x`, `cru:mid|low`, `vendas<3(n=…)`, `censo: <motivo>`,
+  `censo-CGC-aproximado`, `VE<0`, `retorno-extremo(≥300%)`. Notas que não mudam o
+  status: `baixa-liquidez(365d)`, `2ª-nota-sem-ref`.
+- **Limites declarados na entrega (não esconder):** a taxa do censo é HISTÓRICA (quem
+  gradua escolhe as melhores cópias — não é a chance desta cópia; a conferência do
+  scan frente/verso é do operador); o censo é o do PriceCharting, MENSAL, e atrasa em
+  set recente (o `pokemon-longterm-outlook` usa a GemRate, diária — portar é
+  pendência); o censo CGC não separa 9.5/Pristine (rota CGC vai sempre para revisão);
+  a pontuação é régua de ordenação, não previsão.
+- **Custo de tempo**: 1 busca + 1 página do PriceCharting por carta identificada
+  (~3 s cada; uma página de 96 anúncios levou ~4 min na prova de 2026-11-16).
+  Restrinja com `--group`/`--sets`, `--iconic-only`, `--chase-only`, `--max-selected`.
+- **Sets sem página no PriceCharting por nome**: `XY Base Set`, `SM Base Set`,
+  `Pokemon GO` e os subsets (Trainer Gallery, Shiny Vault, Radiant Collection,
+  Galarian Gallery) ainda não casam o console — saem em `grading_no_page`. A v0.5.0
+  corrigiu os sets `XY - …`/`SM - …` (ver CHANGELOG).
+
+```bash
+python -m comc_scanner scan --group 9 --grading                    # PSA, teto US$100, sem piso
+python -m comc_scanner scan --sets "XY - Evolutions" --grading --iconic-only
+python -m comc_scanner scan --group 11 --grading --grader CGC --grading-cost 12
+python comc_summary.py results/comc_deals_grading_grupo9_latest.json -o results/comc-grading-grupo9-<data>.md --group 9
+```
+
+Colunas da tabela do modo grading: `# | Pontos | Retorno esperado% | Custo$ | COMC$ |
+Nota máx$ | 2ª nota$ | Crua$ | Taxa nota máx% | Empate% | Pop nota máx/total |
+Vendas/mês | Cópias COMC | Pokémon | Carta | Set | Tipo | Ref | Conf | Status | Links`
+— fonte única em `reporter.render_grading_table`; valor ausente sai como `n/d`.
+
 ## 📤 COMO ENTREGAR RESULTADOS (regra dura — não improvisar)
 
 1. **Entrega = uma tabela markdown colada AQUI no chat.** Nunca arquivo por padrão.
@@ -135,7 +201,8 @@ do set — nunca substring: `"Base Set"` não pega "Base Set 2"; `"151"` NÃO ca
 carta, corta antes do PriceCharting); `--max-selected N` (encerra o set após N
 listagens dos idiomas selecionados; `--max-english` é alias legado; 0 = todas);
 `--raw-only` / `--slabs-only`; `--iconic-only` / `--all-pokemon`; `--chase-only`;
-`--min-confidence`; `--max-pages`; `--max-run-seconds`; `--interval`; `--top-n`.
+`--min-confidence`; `--max-pages`; `--max-run-seconds`; `--interval`; `--top-n`;
+`--grading` (+ `--grader PSA|CGC`, `--grading-cost`) — ver "Modo grading".
 Outros subcomandos: `list-groups`, `validate-slugs [--revalidate]`, `warm`, `capture`.
 `--headful`/`--restart` são aceitos por compatibilidade e não fazem nada (sempre
 headful; sempre do zero).
@@ -180,7 +247,7 @@ Configuração por env (`.env.example` lista tudo): `MIN_DISCOUNT_PERCENT`,
 ## Testes
 
 ```bash
-python -m pytest tests/    # 307 testes — offline, sem rede, sem browser
+python -m pytest tests/    # 366 testes — offline, sem rede, sem browser
 ```
 
 `tests/fixtures/` traz páginas REAIS: vitrine ungraded (2026-06-08), duas vitrines
@@ -198,6 +265,7 @@ comc_scanner/
   iconic_pokemon.csv     lista do operador (rank, pokemon, score, sources) — EDITÁVEL
   iconic.py              match por palavra inteira contra a lista
   grading.py             parse da nota do slab (/Graded/<grader>/<nota> + título) + allowlist + coluna PC
+  grading_mode.py        modo grading: rotas PSA/CGC, a conta (custo, empate, valor esperado), pontos, status
   comc_scraper.py        navegação COMC via patchright headful; parse de raw E slabs
   pipeline.py            Scanner.run_scan (2 passadas/set) + process_listing (funil único) + FunnelStats
   matcher.py / normalize.py / tcg_index.py   identificação da carta no TCGplayer (confiança 0-1)
@@ -216,4 +284,4 @@ results/                 saídas (gitignored)
 
 - Código = **branch + PR**; nunca push direto na `main`.
 - Dados de scan, `.env`, caches e perfis de navegador não entram no repo.
-- Versão: **0.4.4** (`pyproject.toml` + `CHANGELOG.md`, 2026-09-11).
+- Versão: **0.5.0** (`pyproject.toml` + `CHANGELOG.md`, 2026-11-16).
